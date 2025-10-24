@@ -10,4 +10,6 @@ cd ..
 
 source miniconda3/bin/activate
 
+conda init
+
 echo "Success to build anaconda environment. Please restart the terminal."
