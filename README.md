@@ -9,6 +9,7 @@ git clone https://github.com/nullpo0/e4e.git
 2. install anaconda and setting
 ```
 source conda.sh
+conda init
 ```
 3. initialize environment
 ```
