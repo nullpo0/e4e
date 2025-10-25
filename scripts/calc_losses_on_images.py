@@ -18,10 +18,10 @@ from datasets.gt_res_dataset import GTResDataset
 def parse_args():
     parser = ArgumentParser(add_help=False)
     parser.add_argument('--mode', type=str, default='lpips', choices=['lpips', 'l2'])
-    parser.add_argument('--data_path', type=str, default='results')
-    parser.add_argument('--gt_path', type=str, default='gt_images')
-    parser.add_argument('--workers', type=int, default=4)
-    parser.add_argument('--batch_size', type=int, default=4)
+    parser.add_argument('--data_path', type=str, default='result/inversions')
+    parser.add_argument('--gt_path', type=str, default='img')
+    parser.add_argument('--workers', type=int, default=1)
+    parser.add_argument('--batch_size', type=int, default=1)
     parser.add_argument('--is_cars', action='store_true')
     args = parser.parse_args()
     return args

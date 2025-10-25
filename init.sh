@@ -9,5 +9,6 @@ pip install dlib --no-cache-dir --no-binary :all:
 pip install matplotlib
 pip install ninja
 pip install scipy
+pip install opencv-python
 
 sudo chmod 777 result
