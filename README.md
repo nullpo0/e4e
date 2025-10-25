@@ -1,4 +1,4 @@
-# encoder4editing 최신버전
+# encoder4editing updated
 e4e 원문은 꽤 오래되어 파이썬 버전도 낮고 많은 부분에서 충돌이 일어나므로 최신버전에 맞추어 작업할 수 있도록 하는것이 배포 목적임.
 
 ## getting started
