@@ -40,7 +40,7 @@ def main(args):
         # generate_inversions(args, generator, latent_codes, is_cars=is_cars)
 
 def extract_noise(data_loader):
-    # 이 함수를 변경
+    # 이 함수를 변경 extract_method.txt 참조
     pass
 
 

@@ -1,0 +1,212 @@
+def extract_noise_laplacian(data_loader, num_layers=17, ksize=3, device='cuda'):
+    """
+    Laplacian 필터 기반 고주파 추출 함수.
+    DoG 기반 extract_noise() 구조를 그대로 따름.
+    
+    Args:
+        data_loader: 이미지 배치 로더 (B,C,H,W)
+        num_layers: 노이즈 맵을 추출할 레이어 수
+        ksize: Laplacian 커널 크기 (3, 5 등)
+        device: torch 디바이스
+    Returns:
+        all_noises_per_layer: 각 해상도별 Laplacian 고주파 맵 리스트
+    """
+
+    all_noises_per_layer = [[] for _ in range(num_layers)]
+
+    for batch in data_loader:
+        img = batch.to(device).float()
+        img_gray = img.mean(dim=1, keepdim=True)
+        B, _, H, W = img_gray.shape
+        img_np = img_gray.detach().cpu().numpy()
+
+        lap_batch = []
+        for b in range(B):
+            img_b = img_np[b, 0]
+            # Laplacian 필터 적용
+            lap = cv2.Laplacian(img_b, cv2.CV_32F, ksize=ksize)
+            lap_batch.append(lap[None, None])
+
+        noise_tensor = torch.tensor(np.concatenate(lap_batch), dtype=torch.float32, device=device)
+
+        # 각 layer 해상도에 맞게 interpolate + normalize
+        for layer_idx in range(num_layers):
+            res = (layer_idx + 5) // 2
+            h = w = 2 ** res
+            n = F.interpolate(noise_tensor, size=(h, w), mode='bilinear', align_corners=False)
+            n = (n - n.mean(dim=[1,2,3], keepdim=True)) / (n.std(dim=[1,2,3], keepdim=True) + 1e-8)
+            all_noises_per_layer[layer_idx].append(n)
+
+    for i in range(num_layers):
+        all_noises_per_layer[i] = torch.cat(all_noises_per_layer[i], dim=0)
+
+    return all_noises_per_layer
+
+def extract_noise_highpass(data_loader, num_layers=17, sigma=2.0, device='cuda'):
+    """
+    Gaussian 기반 High-pass 필터로 고주파(노이즈) 추출.
+
+    Args:
+        data_loader: torch DataLoader (B,C,H,W)
+        num_layers: 노이즈 맵 추출 레이어 수
+        sigma: Gaussian blur 표준편차 (커질수록 저주파가 더 넓게 제거)
+        device: torch device ('cuda' or 'cpu')
+    Returns:
+        all_noises_per_layer: 각 레이어별 고주파 노이즈 맵 리스트
+    """
+
+    all_noises_per_layer = [[] for _ in range(num_layers)]
+
+    for batch in data_loader:
+        img = batch.to(device).float()
+        img_gray = img.mean(dim=1, keepdim=True)  # grayscale 변환
+        B, _, H, W = img_gray.shape
+        img_np = img_gray.detach().cpu().numpy()
+
+        high_batch = []
+        for b in range(B):
+            img_b = img_np[b, 0]
+
+            # Gaussian Blur (저주파)
+            low_pass = cv2.GaussianBlur(img_b, (0, 0), sigma)
+
+            # 원본 - 저주파 = 고주파
+            high_pass = img_b - low_pass
+
+            high_batch.append(high_pass[None, None])
+
+        noise_tensor = torch.tensor(np.concatenate(high_batch), dtype=torch.float32, device=device)
+
+        # 해상도별로 interpolation + normalization
+        for layer_idx in range(num_layers):
+            res = (layer_idx + 5) // 2
+            h = w = 2 ** res
+            n = F.interpolate(noise_tensor, size=(h, w), mode='bilinear', align_corners=False)
+            n = (n - n.mean(dim=[1,2,3], keepdim=True)) / (n.std(dim=[1,2,3], keepdim=True) + 1e-8)
+            all_noises_per_layer[layer_idx].append(n)
+
+    for i in range(num_layers):
+        all_noises_per_layer[i] = torch.cat(all_noises_per_layer[i], dim=0)
+
+    return all_noises_per_layer
+
+from scipy.fftpack import dct, idct
+
+def extract_noise_dct_multiscale(data_loader, num_layers=17, keep_ratio=0.1, device='cuda'):
+    """
+    DCT 기반 멀티스케일 고주파(노이즈) 추출 함수.
+    해상도별로 다운샘플 후, 각 스케일에서 DCT 기반 고주파 추출을 수행함.
+
+    Args:
+        data_loader: torch DataLoader (B,C,H,W)
+        num_layers: 노이즈 맵 레이어 수
+        keep_ratio: 저주파 유지 비율 (0.1 → 하위 10%는 제거하지 않음)
+        device: torch device
+    Returns:
+        all_noises_per_layer: 각 레이어별 고주파 맵 리스트
+    """
+    all_noises_per_layer = [[] for _ in range(num_layers)]
+
+    for batch in data_loader:
+        img = batch.to(device).float()
+        img_gray = img.mean(dim=1, keepdim=True)  # (B,1,H,W)
+        B, _, H, W = img_gray.shape
+        img_np = img_gray.detach().cpu().numpy()
+
+        # 🔹 각 레이어별 해상도에서 노이즈 추출
+        for layer_idx in range(num_layers):
+            res = (layer_idx + 5) // 2
+            h = w = 2 ** res
+
+            dct_batch = []
+            for b in range(B):
+                # 해상도별 다운샘플링
+                img_resized = cv2.resize(img_np[b, 0], (w, h), interpolation=cv2.INTER_AREA)
+
+                # DCT 변환
+                dct_freq = dct(dct(img_resized.T, norm='ortho').T, norm='ortho')
+
+                # 저주파 마스크 생성
+                mask = np.ones_like(dct_freq)
+                h_keep = int(h * keep_ratio)
+                w_keep = int(w * keep_ratio)
+                mask[:h_keep, :w_keep] = 0  # 저주파 제거
+
+                # 고주파 성분만 남기기
+                high_freq_dct = dct_freq * mask
+
+                # 역DCT로 복원
+                high_freq_img = idct(idct(high_freq_dct.T, norm='ortho').T, norm='ortho')
+
+                dct_batch.append(high_freq_img[None, None])
+
+            # 텐서 변환 및 정규화
+            noise_tensor = torch.tensor(np.concatenate(dct_batch), dtype=torch.float32, device=device)
+            noise_tensor = (noise_tensor - noise_tensor.mean(dim=[1,2,3], keepdim=True)) / (
+                noise_tensor.std(dim=[1,2,3], keepdim=True) + 1e-8
+            )
+
+            all_noises_per_layer[layer_idx].append(noise_tensor)
+
+    # 레이어별로 concat
+    for i in range(num_layers):
+        all_noises_per_layer[i] = torch.cat(all_noises_per_layer[i], dim=0)
+
+    return all_noises_per_layer
+
+
+def extract_noise_dct(data_loader, num_layers=17, keep_ratio=0.1, device='cuda'):
+    """
+    DCT 기반 고주파(노이즈) 추출 함수.
+    
+    Args:
+        data_loader: torch DataLoader (B,C,H,W)
+        num_layers: 노이즈 맵 레이어 수
+        keep_ratio: 저주파 유지 비율 (0.1 → 하위 10%만 남기고 나머지 고주파)
+        device: torch device
+    Returns:
+        all_noises_per_layer: 각 레이어별 고주파 맵 리스트
+    """
+    all_noises_per_layer = [[] for _ in range(num_layers)]
+
+    for batch in data_loader:
+        img = batch.to(device).float()
+        img_gray = img.mean(dim=1, keepdim=True)
+        B, _, H, W = img_gray.shape
+        img_np = img_gray.detach().cpu().numpy()
+
+        dct_batch = []
+        for b in range(B):
+            img_b = img_np[b, 0]
+
+            # DCT 변환 (2D)
+            dct_freq = dct(dct(img_b.T, norm='ortho').T, norm='ortho')
+
+            # 저주파 마스크 생성
+            mask = np.ones_like(dct_freq)
+            h_keep = int(H * keep_ratio)
+            w_keep = int(W * keep_ratio)
+            mask[:h_keep, :w_keep] = 0  # 중앙(저주파) 제거 X → 0으로 만들어서 제거
+
+            # 고주파만 남기기
+            high_freq_dct = dct_freq * mask
+
+            # 역DCT로 복원
+            high_freq_img = idct(idct(high_freq_dct.T, norm='ortho').T, norm='ortho')
+
+            dct_batch.append(high_freq_img[None, None])
+
+        noise_tensor = torch.tensor(np.concatenate(dct_batch), dtype=torch.float32, device=device)
+
+        # 해상도별 interpolation + normalization
+        for layer_idx in range(num_layers):
+            res = (layer_idx + 5) // 2
+            h = w = 2 ** res
+            n = F.interpolate(noise_tensor, size=(h, w), mode='bilinear', align_corners=False)
+            n = (n - n.mean(dim=[1,2,3], keepdim=True)) / (n.std(dim=[1,2,3], keepdim=True) + 1e-8)
+            all_noises_per_layer[layer_idx].append(n)
+
+    for i in range(num_layers):
+        all_noises_per_layer[i] = torch.cat(all_noises_per_layer[i], dim=0)
+
+    return all_noises_per_layer
