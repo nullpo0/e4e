@@ -12,3 +12,7 @@ pip install scipy
 pip install opencv-python
 
 sudo chmod 777 result
+
+mkdir pretrained_models
+mkdir result
+mkdir img
