@@ -37,11 +37,64 @@ def main(args):
 
     if not args.latents_only:
         generate_inversions(args, generator, latent_codes, is_cars=is_cars, noises=ext_noise)
-        # generate_inversions(args, generator, latent_codes, is_cars=is_cars)
+        # generate_inversions(args, generator, latent_codes, is_cars=is_cars) # 기존 e4e
 
-def extract_noise(data_loader):
-    # 이 함수를 변경 extract_method.txt 참조
-    pass
+from scipy.fftpack import dct, idct
+def extract_noise_dct(data_loader, num_layers=17, keep_ratio=0.1, device='cuda'):
+    """
+    DCT 기반 고주파(노이즈) 추출 함수.
+    
+    Args:
+        data_loader: torch DataLoader (B,C,H,W)
+        num_layers: 노이즈 맵 레이어 수
+        keep_ratio: 저주파 유지 비율 (0.1 → 하위 10%만 남기고 나머지 고주파)
+        device: torch device
+    Returns:
+        all_noises_per_layer: 각 레이어별 고주파 맵 리스트
+    """
+    all_noises_per_layer = [[] for _ in range(num_layers)]
+
+    for batch in data_loader:
+        img = batch.to(device).float()
+        img_gray = img.mean(dim=1, keepdim=True)
+        B, _, H, W = img_gray.shape
+        img_np = img_gray.detach().cpu().numpy()
+
+        dct_batch = []
+        for b in range(B):
+            img_b = img_np[b, 0]
+
+            # DCT 변환 (2D)
+            dct_freq = dct(dct(img_b.T, norm='ortho').T, norm='ortho')
+
+            # 저주파 마스크 생성
+            mask = np.ones_like(dct_freq)
+            h_keep = int(H * keep_ratio)
+            w_keep = int(W * keep_ratio)
+            mask[:h_keep, :w_keep] = 0  # 중앙(저주파) 제거 X → 0으로 만들어서 제거
+
+            # 고주파만 남기기
+            high_freq_dct = dct_freq * mask
+
+            # 역DCT로 복원
+            high_freq_img = idct(idct(high_freq_dct.T, norm='ortho').T, norm='ortho')
+
+            dct_batch.append(high_freq_img[None, None])
+
+        noise_tensor = torch.tensor(np.concatenate(dct_batch), dtype=torch.float32, device=device)
+
+        # 해상도별 interpolation + normalization
+        for layer_idx in range(num_layers):
+            res = (layer_idx + 5) // 2
+            h = w = 2 ** res
+            n = F.interpolate(noise_tensor, size=(h, w), mode='bilinear', align_corners=False)
+            n = (n - n.mean(dim=[1,2,3], keepdim=True)) / (n.std(dim=[1,2,3], keepdim=True) + 1e-8)
+            all_noises_per_layer[layer_idx].append(n)
+
+    for i in range(num_layers):
+        all_noises_per_layer[i] = torch.cat(all_noises_per_layer[i], dim=0)
+
+    return all_noises_per_layer
 
 
 def setup_data_loader(args, opts):
