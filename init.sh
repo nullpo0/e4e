@@ -10,8 +10,7 @@ pip install matplotlib
 pip install ninja
 pip install scipy
 pip install opencv-python
-
-sudo chmod 777 result
+conda install -c conda-forge libstdcxx-ng
 
 mkdir pretrained_models
 mkdir result
